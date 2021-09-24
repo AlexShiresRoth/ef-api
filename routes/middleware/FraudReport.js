@@ -7,79 +7,100 @@ const { FraudCheck } = require("./FraudCheck");
 const { format } = require("date-fns");
 const mailgun = require("mailgun-js");
 const Report = require("../../models/Report");
+const { validateEmail } = require("./validateEmail");
+const { validateLocation } = require("./geocode");
 const mg = mailgun({
   apiKey: process.env.MAILGUN_API_KEY,
   domain: "sandboxf00916c1597e4395bbbe3ad940fd43bb.mailgun.org",
 });
 
 module.exports.runDisputeReport = async () => {
+  //Always mail yesterday's report
   const yesterday = new Date();
+
   yesterday.setDate(yesterday.getDate() - 1);
+
   const yesterdayTime = Math.round(yesterday.getTime() / 1000);
+
   const yesterdayFormatted = format(yesterday, "P");
+  //float between 0-100
+
   try {
     const disputes = await stripe.disputes.list({
       limit: 100,
-      created: { gte: yesterdayTime },
-    });
-
-    const fraudDisputes = disputes.data.filter((dis) => {
-      return dis.reason === "fraudulent";
+      // created: { gte: yesterdayTime },
     });
 
     const checked = await Promise.all(
-      fraudDisputes
-        .map(async (dispute) => {
-          try {
-            const addressSplit = dispute.evidence.shipping_address.split(",");
-
-            const formatObjForEKATAPI = {
-              evidence: {
-                customer_name: dispute.evidence?.customer_name || "",
-                customer_email_address:
-                  dispute.evidence?.customer_email_address || "",
-                customer_ip_address:
-                  dispute.evidence?.customer_purchase_ip || "",
-                street_line_1: dispute.evidence?.shipping_address,
-                city: "",
-                postal_code: addressSplit[addressSplit.length - 2] || "",
-                state_code: addressSplit[addressSplit.length - 3] || "",
-                country_code: addressSplit[addressSplit.length - 1] || "",
-                phone: "",
-                transaction_id: dispute.charge,
-                transaction_time: dispute.created,
-              },
-            };
-            const fraudCheckASYNC = await FraudCheck(
-              formatObjForEKATAPI.evidence
-            );
-
-            const { caseRating, percentage } = fraudCheckASYNC;
-
-            if (caseRating !== "LOW") {
-              const adjustedDispute = {
-                ...dispute,
-                fraud_risk: caseRating,
-                fraud_details: `This user scored a ${caseRating} risk, please review`,
-                fraud_score: percentage + "%",
-              };
-
-              console.log("fraud check", adjustedDispute);
-              return adjustedDispute;
-            }
-            return;
-          } catch (error) {
-            console.error("error!", error);
-            return undefined;
+      disputes.data.map(async (dispute) => {
+        let fraud_risk_score = 0;
+        let fraud_details = "";
+        try {
+          if (!dispute.evidence.customer_email_address) {
+            fraud_risk_score = fraud_risk_score + 50;
+            fraud_details = `${fraud_details}. No email provided.`;
           }
-        })
-        .filter((item) => item !== "undefined" || item !== null)
+
+          const isEmailValid = await validateEmail(
+            dispute.evidence.customer_email_address
+          );
+
+          if (!isEmailValid.valid) {
+            fraud_risk_score = fraud_risk_score + 20;
+            fraud_details = `${fraud_details} ${JSON.stringify(
+              isEmailValid.reasons
+            )}`;
+          }
+
+          if (!dispute.evidence.shipping_address) {
+            fraud_risk_score = fraud_risk_score + 50;
+            fraud_details = `${fraud_details}. No address provided.`;
+          }
+
+          const isLocationValid = await validateLocation(
+            dispute.evidence.shipping_address
+          );
+
+          if (!isLocationValid.valid) {
+            fraud_risk_score = fraud_risk_score + 20;
+            fraud_details = `${fraud_details} ${JSON.stringify(
+              isLocationValid.reasons
+            )}`;
+          }
+          console.log("dispute!", fraud_risk_score, fraud_details);
+
+          if (fraud_risk_score >= 40) {
+            const adjustedDispute = {
+              ...dispute,
+              fraud_risk: fraud_risk_score,
+              fraud_details: `FRAUD_RISK_SCORE: ${fraud_risk_score}, please review. ADDITIONAL_FRAUD_REASONS: ${fraud_details}`,
+              fraud_score: fraud_risk_score + "%",
+            };
+
+            console.log("fraud check", adjustedDispute);
+            return adjustedDispute;
+          }
+          //Return null if no fraudulent dispute was reported
+          return null;
+        } catch (error) {
+          console.error("error! checking dispute", error);
+          return undefined;
+        }
+      })
     );
 
+    const filteredFraudDispute = await checked.filter(Boolean);
+
     const data = {
-      reportBody: checked,
+      reportBody: filteredFraudDispute,
       reportDate: yesterdayFormatted,
     };
+
+    console.log("checked", data);
+    if (data.reportBody.length === 0) {
+      console.log("No fraudulent disputes to report");
+      return;
+    }
 
     const newReport = new Report(data);
 

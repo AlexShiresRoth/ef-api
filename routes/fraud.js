@@ -1,6 +1,5 @@
 const stripe = require("stripe")(process.env.STRIPE_LULU_LIVE);
 const express = require("express");
-const fs = require("fs/promises");
 const { v4: uuidv4 } = require("uuid");
 const Report = require("../models/Report");
 const Transaction = require("../models/Transaction");
@@ -14,6 +13,10 @@ const endpointSecret =
   process.env.NODE_ENV !== "production"
     ? devEndpointSecret
     : liveEndpointSecret;
+
+router.get("/", async (req, res) => {
+  return res.status(200).send({ msg: "Im a good boy!" });
+});
 //@route GET route
 //@desc receive incoming payment to check fraud
 //@access private
@@ -190,8 +193,6 @@ router.post("/incoming_payment", async (req, res) => {
 //@desc get report from id
 //@access private
 router.get("/report/:id", async (req, res) => {
-  // const { _id } = req._id;
-  console.log("repooorrrrtt", req.params.id);
   try {
     const foundReport = await Report.findById(req.params.id);
     console.log("found a report", foundReport);
@@ -208,10 +209,6 @@ router.get("/disputes", async (req, res) => {
   try {
     const report = await runBulkDisputeReport();
 
-    // console.log(
-    //   "report?",
-    //   report.reportBody.filter((report) => report !== undefined)
-    // );
     return res.json(report);
   } catch (error) {
     console.error("error", error);
